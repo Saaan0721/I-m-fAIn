@@ -45,12 +45,14 @@ GpioPins_LR = [17, 18, 27, 22]
 GpioPins_TB = [19, 16, 13, 12]
 fanPin1 = 20
 fanPin2 = 26
+button_pin = 15
 
 step_LR = 0
 step_TB = 0
 dir_LR = 0
 dir_TB = 0
-is_on = False
+no_detection_count = 0
+is_btn = False
 STEP = 40
 DELAY = 0.005
 LIMIT_LR = 1000
@@ -84,13 +86,13 @@ GPIO.setup( GpioPins_TB[1], GPIO.OUT )
 GPIO.setup( GpioPins_TB[2], GPIO.OUT )
 GPIO.setup( GpioPins_TB[3], GPIO.OUT )
 
+GPIO.setup(button_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
 event_LR = Event()
 event_TB = Event()
 
 def lr(step):
-    global step_LR
-    global step_sequence
-    global dir_LR
+    global step_LR, step_sequence, dir_LR
     print('lr', dir_LR)
     for i in range(step):
         for pin in range(len(GpioPins_LR)):
@@ -108,9 +110,7 @@ def lr(step):
  
 
 def tb(step):
-    global step_TB
-    global step_sequence
-    global dir_TB
+    global step_TB, step_sequence, dir_TB
     print('tb', dir_TB)
     for i in range(step):
         for pin in range(len(GpioPins_TB)):
@@ -131,21 +131,25 @@ def fan(on):
     if on:
         GPIO.output(fanPin1, GPIO.HIGH)
         GPIO.output(fanPin2, GPIO.LOW)
-        print('fan on')
+        
     else:
         GPIO.output(fanPin1, GPIO.LOW)
         GPIO.output(fanPin2, GPIO.LOW)
-        print('fan off')
+        
 
 
 def turn_off():
-    global dir_LR, dir_TB, step_LR, step_TB, is_on
+    fan(False)
+
+    global dir_LR, dir_TB, step_LR, step_TB
+    return_step_LR = step_LR
+    return_step_TB = step_TB
     
     if step_LR > 0:
         dir_LR = 2
     elif step_LR < 0:
         dir_LR = 1
-        step_LR = -step_LR
+        return_step_LR = -return_step_LR
     else:
         dir_LR = 0
 
@@ -153,22 +157,31 @@ def turn_off():
         dir_TB = 2
     elif step_TB < 0:
         dir_TB = 1
-        step_TB = -step_TB
+        return_step_TB = -return_step_TB
     else:
         dir_TB = 0
     
+    if return_step_LR > 0:
+        t1 = Thread(target=lr, args=(return_step_LR, ))
+        t1.start()
 
-    t1 = Thread(target=lr, args=(step_LR, ))
-    t2 = Thread(target=tb, args=(step_TB, ))
-    t1.start()
-    t2.start()
+    if return_step_TB > 0:
+        t2 = Thread(target=tb, args=(return_step_TB, ))
+        t2.start()
 
-    print('turn off')
-    is_on = False
+    if return_step_LR > 0:
+        t1.join()
+    
+    if return_step_TB > 0:
+        t2.join()
 
-    t1.join()
-    t2.join()
+def button_callback(channel):
+    global is_btn
+    is_btn = not is_btn
+    print('callback: ', is_btn)
 
+
+GPIO.add_event_detect(button_pin, GPIO.RISING, callback=button_callback, bouncetime=100)
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -215,7 +228,7 @@ def run(
         dnn=False,  # use OpenCV DNN for ONNX inference
         vid_stride=1,  # video frame-rate stride
 ):
-    global dir_LR, dir_TB
+    global dir_LR, dir_TB, no_detection_count, is_btn
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
@@ -288,8 +301,8 @@ def run(
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
             if len(det):
                 # Turn on fan
-                is_on = True
                 fan(True)
+                no_detection_count = 0
 
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
@@ -327,8 +340,6 @@ def run(
                         y = xywh[1]
 
                 print(x, y)
-                print(step_LR, step_TB)
-
 
                 if x < LOWER_THRESHOLD and step_LR > -LIMIT_LR:
                     dir_LR = 1
@@ -350,9 +361,18 @@ def run(
                 t2.start()
                 
             else:
-                fan(False)
-                if is_on:
+                no_detection_count += 1
+                print('no detection: ', no_detection_count)
+                if no_detection_count >= 5:
+                    fan(False)
                     turn_off()
+                
+            print(step_LR, step_TB)
+
+            if is_btn:
+                turn_off()
+            while is_btn:
+                continue
 
             # Stream results
             im0 = annotator.result()
